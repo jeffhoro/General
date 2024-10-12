@@ -1,5 +1,5 @@
 ---
-title: "Post-Module Assignment 2 - HighNote Monetization Case"
+title: "HighNote Monetization Case"
 author: "Jeff Horowitz"
 date: '`r format(Sys.Date(), "%B %d, %Y")`'
 output:
