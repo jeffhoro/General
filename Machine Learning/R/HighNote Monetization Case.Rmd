@@ -213,7 +213,7 @@ names(clf_results) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
 
 ## Load Pre-Trained Models
 
-For the purposes of this assignment, all models have been pre-trained. Models have been saved and can be loaded so that we do not have to re-train each model every time the file is run. If the models are not stored in the local directory, you will have to train them again. Loading the models versus training them each time the file is run saves processing time as some models can take hours to train. All training code has been commented out for this assignment to decrease run time.
+For the purposes of this exercise, all models have been pre-trained. Models have been saved and can be loaded so that we do not have to re-train each model every time the file is run. If the models are not stored in the local directory, you will have to train them again. Loading the models versus training them each time the file is run saves processing time as some models can take hours to train. All training code has been commented out for this exercise to decrease run time.
 
 ```{r}
 # Load in all models
