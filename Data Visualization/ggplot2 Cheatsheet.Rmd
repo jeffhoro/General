@@ -1,0 +1,217 @@
+---
+title: "ggplot2 Cheatsheet"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+author: "Jeff Horowitz"
+output:
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Background
+This is a working guide to create plots using the ggplot2 library. It uses the capital bikeshare data which is publically available here: https://capitalbikeshare.com/system-data. 
+
+# Load Libraries
+
+Load in all libraries required for plotting.
+
+```{r}
+library(tidyverse)
+library(dplyr) 
+library(ggplot2)
+library(ggthemes)
+library(knitr)
+library(DataExplorer)
+library(scales)
+library(extrafont)
+loadfonts(device = "win")
+```
+
+# Data Loading and Pre-Processing
+
+Begin by loading data and pre-processing, including filling in any missing values.
+
+```{r}
+bikeshare <- read_csv("bikesharedailydata.csv")
+
+kable(head(bikeshare,5))
+
+str(bikeshare)
+
+bikeshare$yr <- factor(bikeshare$yr, levels = c(0, 1), labels = c("2011", "2012"))
+
+bikeshare$season <- factor(bikeshare$season, levels = c(1,2,3,4), labels = c("Winter", "Spring", "Summer", "Fall"))
+
+bikeshare <- rename(bikeshare, humidity = hum, month=mnth)
+names(bikeshare)
+
+colSums(is.na(bikeshare))
+
+colnames(bikeshare)[colSums(is.na(bikeshare)) > 0] 
+
+biketidy <- bikeshare[complete.cases(bikeshare),]
+nrow(biketidy)
+nrow(bikeshare)-nrow(biketidy)  
+
+biketrack <- bikeshare[!complete.cases(bikeshare),] 
+biketrack
+
+bikeshare$season[7] <- "Winter"
+bikeshare$month[10] <-1
+bikeshare$season[7]
+bikeshare$month[10]
+
+plot_missing(bikeshare) 
+```
+
+# Build Theme
+
+```{r}
+mytheme <- theme(panel.background = element_blank(),
+                 panel.grid = element_blank(),
+                 axis.line = element_line(color="#999999"),
+                 axis.ticks.y = element_blank(),
+                 axis.ticks.x = element_blank(),
+                 text = element_text(family = "Tahoma", size = 11),
+                 plot.title = element_text(size=11))
+```
+
+
+# 1. Bar Chart
+
+```{r}
+
+ggplot(data = bikeshare, aes(x=season, y=cnt)) + 
+  geom_bar(stat = "identity", color = "#1594e8", fill = "#1594e8") +
+  scale_y_continuous(labels = comma) + 
+  labs(title = "Bike Rentals per Season (2011 - 2012)",
+       caption = "Jeff Horowitz | Data Source: Capital Bikeshare") +
+  mytheme +
+  theme(
+    axis.title = element_blank()
+  )
+
+```
+
+# 2. Histogram
+
+```{r}
+
+hist_data <- subset(bikeshare, bikeshare$yr == 2011)
+
+hist_data_binned <- hist_data %>%
+  mutate(bin = cut(cnt, breaks = 30)) %>%
+  group_by(bin) %>%
+  summarize(count = n()) %>%
+  ungroup()
+
+max_bin <- hist_data_binned %>%
+  filter(count == max(count)) %>%
+  pull(bin)
+
+ggplot(data = hist_data, aes(x = cnt)) +
+  geom_histogram(aes(fill = cut(cnt, breaks = 30) == max_bin), color = "#999999", bins = 30) +
+  scale_fill_manual(values = c("FALSE" = "#1594e8", "TRUE" = "#ea6b17"), guide = "none") +
+  scale_x_continuous(labels = comma) +
+  labs(title = "Frequency of Bike Rentals (2011)",
+       x = "Rentals",
+       caption = "Jeff Horowitz | Data Source: Capital Bikeshare") +
+  mytheme +
+  theme(axis.title.y = element_blank())
+
+```
+
+# 3. Scatterplot
+
+```{r}
+
+ggplot(data = bikeshare, aes(x=cnt, y=temp)) + 
+  geom_point(color = "#1594e8") +
+  scale_x_continuous(labels = comma) + 
+  labs(title = "Relationship of Temperature and Bike Rentals (2011 - 2012)",
+       x = "Rentals",
+       y = "Temperature (F)",
+       caption = "Jeff Horowitz | Data Source: Capital Bikeshare") +
+  mytheme
+```
+
+# 4. Line Chart
+
+```{r}
+
+line_data <- subset(bikeshare, bikeshare$season == "Summer" & bikeshare$yr == 2011)
+
+ggplot(data = line_data, aes(x=1:nrow(line_data), y=cnt)) + 
+  geom_line(color = "#1594e8") + 
+  scale_y_continuous(labels = comma) + 
+  labs(title = "Bike Rentals per Day in Summer (2011)",
+       x = "Days",
+       y = "Number of Rentals",
+       caption = "Jeff Horowitz | Data Source: Capital Bikeshare") + 
+  mytheme
+```
+
+# 5. Boxplot
+
+```{r}
+
+box_data <- subset(bikeshare, bikeshare$yr == 2011)
+box_data$month <- as.factor(box_data$month)
+levels(box_data$month) <- c("Jan","Feb","March","April","May","June","July","Aug","Sept","Oct","Nov","Dec")
+
+ggplot(data = box_data, aes(x=month, y=cnt)) +
+  geom_boxplot(color = "#1594e8") +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Bike Rentals per Month (2011)",
+       caption = "Jeff Horowitz | Data Source: Capital Bikeshare") + 
+  mytheme +
+  theme(axis.title = element_blank())
+```
+
+# 6. Density Plot
+
+```{r}
+
+ggplot(data = bikeshare, aes(x=cnt)) +
+  geom_density(color = "#1594e8", fill = "#1594e8") + 
+  scale_x_continuous(labels = comma) + 
+  labs(title = "Density Plot of Bike Rentals (2011 - 2012)",
+       x = "Rentals",
+       y = "Density",
+       caption = "Jeff Horowitz | Data Source: Capital Bikeshare") +
+  geom_vline(xintercept = round(mean(bikeshare$cnt),2), size = 1, color = "#15e82e", linetype = "dotted") +
+  mytheme
+  
+```
+
+# 7. Stacked Area
+
+```{r}
+seasonal_data <- subset(bikeshare, bikeshare$yr == 2011)
+seasonal_data <- seasonal_data %>%
+  group_by(month) %>%
+  summarise(casual = sum(casual, na.rm = TRUE), 
+            registered = sum(registered, na.rm = TRUE)) %>%
+  pivot_longer(cols = c(casual, registered), names_to = "user_type", values_to = "count")
+
+seasonal_data$month <- as.factor(seasonal_data$month)
+levels(seasonal_data$month) <- c("Jan","Feb","March","April","May","June","July","Aug","Sept","Oct","Nov","Dec")
+seasonal_data$user_type <- as.factor(seasonal_data$user_type)
+
+ggplot(data = seasonal_data, aes(x = month, y = count, group = user_type, fill = user_type)) +
+  geom_area(position = "stack", color = "#999999") +
+  scale_fill_manual(values = c("casual" = "#ea6b17", "registered" = "#1594e8")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Bike Rentals per Month (2011)", 
+       caption = "Jeff Horowitz | Data Source: Capital Bikeshare",
+       fill = "Type") +
+  mytheme +
+  theme(axis.title = element_blank(),
+        legend.position = c(.12,.85),
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8))
+```
+
