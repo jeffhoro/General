@@ -1,0 +1,395 @@
+---
+title: "Conversion Rate Analysis"
+author: "Jeff Horowitz"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Context
+
+**Situation** 
+
+Advertisers are always working to optimize customer relevancy during the e-commerce transaction by experimenting with new ad campaigns, page layouts,and improvements in ML algorithms. They are interested in measuring metrics such as the uplift provided by conducting A/B tests with a treatment and a holdout (control) group. Using the dataset of a holdout experiment recently run, this advertiser is interested in measuring conversion rate per cohort and overall, plus value per transaction (VPT), and uplift. Below are the metric definitions:
+
+$$
+Conversion\;Rate_{Treatment}\;(CR_{T}) = {Unique\;Converted\;Users_{Treatment} \over Unique\;Users_{Treatment}}
+$$
+<br>
+$$
+Conversion\;Rate_{Control}\;(CR_{C}) = {Unique\;Converted\;Users_{Control} \over Unique\;Users_{Control}}
+$$
+<br>
+$$
+Conversion\;Rate_{Uplift} = {CR_{T}\;-\;CR_{C} \over CR_{C}}
+$$
+<br>
+$$
+Value\;Per\;Transaction(VPT) = {\sum_{s\in\{s\}}bidprice\_usd_{s}\over|S|}
+$$
+<br>
+$$
+S = {\{id\;|\;id\;is\;a\;unique\;sessionid\}}
+$$
+
+**Key Question**
+
+After calculating the conversion rates, value per transaction, and uplift for each cohort and overall, identify if the campaign provides positive or negative impact and determine if the results are significant.
+
+
+# 1. Load Libraries
+
+Load in all libraries required for processing and model building.
+
+```{r}
+library(readr)
+library(skimr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(extrafont)
+library(lubridate)
+library(caret)
+library(fastDummies)
+```
+
+# 2. Data Loading and Pre-Processing
+
+Let's begin by loading the data and doing some exploratory data analysis.
+
+```{r}
+# Read in Data
+data <- read_csv("holdout_hKllMfFFdA.csv")
+
+# Check for NA values
+colSums(is.na(data))
+
+# NAs found in device and gender; replace with 'unk'
+data$device <- data$device %>% replace_na('unk')
+data$gender <- data$gender %>% replace_na('unk')
+
+# Format device to lower
+table(data$device)
+data$device <- tolower(data$device)
+
+# Replace NA with 0 for value
+data <- data %>% replace_na(list(value = 0))
+
+# Remove any duplicate rows
+data <- data %>% distinct()
+
+# Add field for conversion
+# If there is a value other than 0, consider a conversion, else 0
+data$converted <- ifelse(data$value == 0, 0, 1)
+
+# Check cohort numbers
+table(data$cohort)
+
+# Remove outlier row
+data <- data %>%
+  filter(cohort != 203902)
+
+# View summary of the data
+str(data)
+summary(data)
+
+```
+
+# 3. Overall Statistics
+
+```{r}
+## Calculate conversion rates ####
+group_summary <- data %>%
+  group_by(group) %>%
+  summarize(
+    unique_users = n_distinct(userhash),
+    unique_converted_users = n_distinct(userhash[converted == 1]),
+    conversion_rate = unique_converted_users / unique_users
+  )
+
+## Calculate uplift ####
+conversionRate_treatment <- group_summary %>% filter(group == "treatment") %>% pull(conversion_rate)
+conversionRate_control <- group_summary %>% filter(group == "control") %>% pull(conversion_rate)
+uplift_overall <- (conversionRate_treatment - conversionRate_control) / conversionRate_control
+
+## Calculate VPT ####
+vpt_overall <- data %>%
+  group_by(group) %>%
+  summarize(
+    sum_bidprice = sum(bidprice_usd),
+    transactions = n_distinct(sessionid),
+    vpt = sum_bidprice / transactions
+  )
+```
+
+# 4. Cohort Statistics
+
+```{r}
+## Calculate conversion rates ####
+cohort_summary <- data %>%
+  group_by(cohort, group) %>%
+  summarize(
+    unique_users = n_distinct(userhash),
+    unique_converted_users = n_distinct(userhash[converted == 1]),
+    conversion_rate = unique_converted_users / unique_users
+  )
+
+# Combine cohort and overall
+conversion_summary <- cohort_summary %>%
+  mutate(cohort = as.character(cohort))
+
+# Add for for control
+conversion_summary[nrow(conversion_summary) +1, ] <- list(
+  cohort = "overall",
+  group = "control",
+  unique_users = group_summary$unique_users[group_summary$group == "control"],
+  unique_converted_users = group_summary$unique_converted_users[group_summary$group == "control"],
+  conversion_rate = group_summary$conversion_rate[group_summary$group == "control"]
+)
+
+# Add row for treatment
+conversion_summary[nrow(conversion_summary) +1, ] <- list(
+  cohort = "overall",
+  group = "treatment",
+  unique_users = group_summary$unique_users[group_summary$group == "treatment"],
+  unique_converted_users = group_summary$unique_converted_users[group_summary$group == "treatment"],
+  conversion_rate = group_summary$conversion_rate[group_summary$group == "treatment"]
+)
+
+## Calculate uplift ####
+uplift_summary <- cohort_summary %>% select(-c("unique_users", "unique_converted_users"))
+uplift_summary <- uplift_summary %>%
+  select(cohort, group, conversion_rate) %>%
+  pivot_wider(
+    names_from = group,
+    values_from = conversion_rate,
+    names_prefix = "conversion_rate_"
+  ) %>%
+  mutate(
+    uplift = (conversion_rate_treatment - conversion_rate_control) / conversion_rate_control
+  )
+
+# Combine cohort and overall
+uplift_summary$cohort <- as.character(uplift_summary$cohort)
+uplift_summary[nrow(uplift_summary) + 1, ] <- list(
+  cohort = "overall",
+  conversion_rate_control = conversionRate_control,
+  conversion_rate_treatment = conversionRate_treatment,
+  uplift = uplift_overall)
+
+## Calculate VPT ####
+vpt_cohort <- data %>%
+  group_by(cohort, group) %>%
+  summarize(
+    sum_bidprice = sum(bidprice_usd),
+    transactions = n_distinct(sessionid),
+    vpt = sum_bidprice / transactions
+  )
+
+# Combine cohort and overall
+vpt_summary <- vpt_cohort %>%
+  mutate(cohort = as.character(cohort)) %>%
+  filter(group != "control") %>%
+  select(-group)
+
+vpt_summary[nrow(vpt_summary) +1, ] <- list(
+  cohort = "overall",
+  sum_bidprice = vpt_overall$sum_bidprice[vpt_overall$group=="treatment"],
+  transactions = vpt_overall$transactions[vpt_overall$group=="treatment"],
+  vpt = vpt_overall$vpt[vpt_overall$group=="treatment"]
+)
+```
+
+# 5. Plotting
+```{r}
+# Set theme
+# Plot conversion rates
+mytheme <- theme(panel.background = element_blank(),
+                 panel.grid = element_blank(),
+                 axis.line = element_line(color="#999999"),
+                 axis.ticks.y = element_blank(),
+                 axis.ticks.x = element_blank(),
+                 axis.title.y = element_blank(),
+                 axis.text.y = element_blank(),
+                 axis.line.y = element_blank(),
+                 plot.title = element_text(size=12),
+                 text = element_text(family = "Tahoma"))
+
+
+## Conversion Rates ####
+# Convert Cohort to month for better plotting
+conversion_summary <- conversion_summary %>%
+  mutate(cohort = ifelse(cohort == "overall", "Overall", format(ym(cohort), "%b")),
+         cohort = factor(cohort, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Overall")))
+
+ggplot(conversion_summary, aes(x = cohort, y = conversion_rate, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = percent(conversion_rate, accuracy = 0.1)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, 
+            size = 3.5) +
+  labs(title = "Conversion Rate Comparison", x = "Cohort", caption = "Jeff Horowitz") +
+  scale_fill_manual(values = c("treatment" = "#b51e6d", "control" = "skyblue")) +
+  mytheme
+
+## Uplift ####
+# Convert Cohort to month for better plotting
+uplift_summary <- uplift_summary %>%
+  mutate(cohort = ifelse(cohort == "overall", "Overall", format(ym(cohort), "%b")),
+         cohort = factor(cohort, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Overall")))
+
+ggplot(uplift_summary, aes(x = cohort, y = uplift, fill = cohort)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = percent(uplift, accuracy = 0.1)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, 
+            size = 3.5) +
+  labs(title = "Uplift Comparison", x = "Cohort", caption = "Jeff Horowitz") +
+  scale_fill_manual(values = c("Feb" = "skyblue",
+                               "Mar" = "skyblue",
+                               "Apr" = "skyblue",
+                               "May" = "skyblue",
+                               "Jun" = "skyblue",
+                               "Overall" = "#b51e6d")) +
+  scale_y_continuous(labels = percent) +
+  mytheme + 
+  theme(legend.position = "none")
+
+## VPT ####
+vpt_summary <- vpt_summary %>%
+  mutate(cohort = ifelse(cohort == "overall", "Overall", format(ym(cohort), "%b")),
+         cohort = factor(cohort, levels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Overall")))
+
+ggplot(vpt_summary, aes(x = cohort, y = vpt, fill = cohort)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = dollar(vpt)), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, 
+            size = 3.5) +
+  labs(title = "VPT Comparison for Treatment Groups", x = "Cohort", caption = "Jeff Horowitz") +
+  scale_fill_manual(values = c("Feb" = "skyblue",
+                               "Mar" = "skyblue",
+                               "Apr" = "skyblue",
+                               "May" = "skyblue",
+                               "Jun" = "skyblue",
+                               "Overall" = "#b51e6d")) +
+  scale_y_continuous(labels = dollar) +
+  mytheme + 
+  theme(legend.position = "none")
+```
+
+# 6. Determine Statistical Significance
+
+Differences in Proportions Test
+
+* Null - there is no difference in the conversion rates for the control and treatment groups
+
+* Alternative - there is a difference in the conversion rates for the control and treatment groups
+
+```{r}
+control_size <- group_summary$unique_users[group_summary$group == "control"]
+treatment_size <- group_summary$unique_users[group_summary$group == "treatment"]
+
+control_converted <- group_summary$unique_converted_users[group_summary$group == "control"]
+treatment_converted <- group_summary$unique_converted_users[group_summary$group == "treatment"]
+
+prop_test <- prop.test(c(control_converted, treatment_converted), c(control_size, treatment_size))
+prop_test$p.value
+```
+
+# 7. Simple Logistic Regression
+
+```{r}
+# Create data set for model
+regression_data <- data %>% 
+  select(-userhash, -sessionid, -campaigntimestamp, -cohort, -value) %>%
+  mutate(agegroup = as.factor(agegroup),
+         device = as.factor(device),
+         gender = as.factor(gender),
+         verticalname = as.factor(verticalname),
+         converted = as.factor(converted),
+         group = as.factor(group)
+         )
+
+# Create dummies
+regression_data <- dummy_cols(regression_data, select_columns = c("agegroup",
+                                                                  "device",
+                                                                  "gender",
+                                                                  "verticalname",
+                                                                  "group"),
+                              remove_selected_columns = TRUE,
+                              remove_first_dummy = FALSE)
+
+# Create n-1 dummies for each feature
+regression_data <- regression_data %>%
+  select(-`agegroup_65+`, -device_other, -gender_m, -verticalname_Finance, -group_control)
+
+# Set x and y
+y <- regression_data$converted
+x <- regression_data %>% select(-converted)
+
+# Train the model
+# glm_fit <- train(x,
+#                  y,
+#                  method = "glm",
+#                  family = "binomial")
+
+# Load Model
+glm_fit <- readRDS('glm_fit.rds')
+
+# Display results
+summary(glm_fit)
+
+# Save Model
+# saveRDS(glm_fit, file = 'glm_fit.rds')
+```
+
+# 8. Conclusion
+
+**Does the campaign provide a positive impact?**
+
+* Conversion rates for treatment groups are higher for all cohorts and overall.
+
+* Seasonality shows reduced treatment effect from April through June.
+
+* Considering the overall conversion rates, the campaign provides a small positive impact as evidenced by the **0.2%** increase between the treatment and control groups.
+
+<br>
+
+**How can we measure the impact?**
+
+* On average, users are **14%** more likely to convert when seeing an ad (see Uplift chart).
+
+* On average, the advertiser pays **$0.08** to show an ad (see VPT chart).
+
+<br>
+
+**Are these results significant?**
+
+To determine if the observed results are significant, we ran a difference in proportions test with the following hypotheses:
+ 
+ * $H_{0}$: there is no difference in the conversion rates
+ 
+ * $H_{a}$: there is a difference in the conversion rates
+ 
+The test resulted in a p-value < 0.01 indicating statistical significance at the 99% level.
+
+<br>
+
+**What's next?**
+
+ * Calculate and evaluate conversion rates, uplift, and VPT among other groups including device type, gender, age, and vertical.
+ 
+ * Run a logistic regression to determine which of the features contribute to the difference in proportions observed.
+ 
+    + Initial results indicate that the following segments are associated with higher conversions: females, age group 46-55, and the sports and fitness vertical.
+ 
+    + Target the identified groups that drive the higher conversions (additional testing required to confirm results)
+ 
+ * Continue to investigate the user segments to determine if there is any bias in the data (i.e., were users in the treatment group predetermined to convert whether they saw the ad or not). 
