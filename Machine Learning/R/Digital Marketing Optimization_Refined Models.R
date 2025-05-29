@@ -43,7 +43,6 @@ data("dt_prophet_holidays")
 head(dt_prophet_holidays)
 
 ## Load Data
-setwd("C:/Users/Leon.H/Downloads/MMM/2025.03.02")
 data <- read.csv("Panel_Data_Q123-Q224_v2.csv")
 head(data)
 
