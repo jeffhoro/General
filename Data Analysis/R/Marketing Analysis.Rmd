@@ -1,0 +1,409 @@
+---
+title: "Marketing Analysis"
+author: "Jeff Horowitz"
+date: "2025-06-08"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Part 1
+
+## Load Libraries
+
+Load in all libraries required for processing and model building.
+
+```{r}
+library(readr)
+library(skimr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(extrafont)
+library(lubridate)
+library(caret)
+library(fastDummies)
+library(readxl)
+library(anomalize)
+library(tidyverse)
+library(tibbletime)
+library(zoo)
+library(scales)
+library(rmarkdown)
+library(pagedown)
+library(kableExtra)
+
+# Load custom plotting theme
+mytheme <- theme(panel.background = element_blank(),
+                 panel.grid = element_blank(),
+                 panel.border = element_blank(),
+                 axis.line = element_line(color="black"),
+                 axis.ticks.y = element_blank(),
+                 axis.ticks.x = element_blank(),
+                 plot.title = element_text(size=12))
+```
+
+
+## Exploratory Data Analysis
+
+```{r}
+# Read in data
+spend_data <- read_excel("acme_spend.xlsx", col_names = TRUE)
+rev_data <- read_excel("acme_revenue.xlsx", col_names = TRUE)
+
+# Remove unnecessary row
+spend_data <- spend_data %>% 
+  select(-...1)
+
+rev_data <- rev_data %>% 
+  select(-...1)
+
+# Check for missing values
+colSums(is.na(spend_data))
+colSums(is.na(rev_data))
+
+# Check for duplicates
+spend_data <- spend_data %>%
+  distinct()
+
+rev_data <- rev_data %>%
+  distinct()
+
+# Preview the data
+glimpse(spend_data)
+skim(spend_data)
+
+glimpse(rev_data)
+skim(rev_data)
+
+# Count the number of channels
+length(unique(spend_data$channel))
+
+# Create a data frame for spend 
+spend_summary <- spend_data %>%
+  group_by(channel) %>%
+  summarise(total_spend = sum(spend, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(desc(total_spend))
+
+# View the data frame
+kable(spend_summary) 
+```
+
+
+## Question 1
+
+**Which channel had the largest increase in spend in 2022 compared to the same date range in 2021?**
+
+```{r}
+# Create new data frame for spend analysis 
+channel_spend_diff <- spend_data %>%
+  filter(year(date) %in% c(2021, 2022)) %>%
+  group_by(channel, year = year(date)) %>%
+  summarise(total_spend = sum(spend, na.rm = TRUE), .groups = 'drop') %>%
+  pivot_wider(names_from = year, values_from = total_spend) %>%
+  mutate(spend_diff = `2022` - `2021`) %>%
+  filter(!is.na(spend_diff)) %>%
+  arrange(desc(spend_diff))
+
+# Plot the results 
+channel_spend_diff %>%
+  mutate(spend_direction = ifelse(spend_diff >= 0, "Increase", "Decrease")) %>%
+  ggplot(aes(x = reorder(channel, spend_diff), y = spend_diff, fill = spend_direction)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Channel Spend Difference (2022 vs 2021)",
+       x = "Channel",
+       y = "Spend Difference",
+       caption = "Jeff Horowitz | Marketing Analysis") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  ) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_fill_manual(values = c("Increase" = "#3f8f29", "Decrease" = "#de1a24")) +
+  mytheme
+
+cat("The channel with the largest increase in spend in 2022 compared to 2021 is", 
+    channel_spend_diff$channel[1], "with a spend difference of", 
+    dollar(channel_spend_diff$spend_diff[1]), ".\n")
+```
+
+## Question 2
+
+**In terms of total revenue, are there any anomalous days?**
+
+```{r}
+# Create a new data frame for revenue analysis
+rev_analysis <- rev_data %>%
+  group_by(date) %>%
+  summarise(total_revenue = sum(revenue_dtc, revenue_walmart, revenue_amazon, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(date)
+
+# Visualize data
+ggplot(rev_analysis, aes(x = date, y = total_revenue)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Daily Revenue Over Time",
+       caption = "Jeff Horowitz | Marketing Analysis") + 
+  mytheme
+
+# Find anomalies using IQR
+q1 <- quantile(rev_analysis$total_revenue, 0.25, na.rm = TRUE)
+q3 <- quantile(rev_analysis$total_revenue, 0.75, na.rm = TRUE)
+iqr <- q3 - q1
+lower_bound <- q1 - 1.5 * iqr
+upper_bound <- q3 + 1.5 * iqr
+
+# Identify anomalies
+anomalies <- rev_analysis %>%
+  mutate(is_anomaly = total_revenue < lower_bound | total_revenue > upper_bound)
+
+# Count anomalies
+cat("Number of anomalous days using IQR:", sum(anomalies$is_anomaly), "\n")
+
+# Find anomalies using z-score
+z_scores <- scale(rev_analysis$total_revenue, center = TRUE, scale = TRUE)
+
+anomalies_z <- rev_analysis %>%
+  mutate(z_score = z_scores,
+         is_anomaly = abs(z_score) > 3)
+
+# Count anomalies using z-score
+cat("Number of anomalous days using z-score:", sum(anomalies_z$is_anomaly), "\n")
+```
+
+As we can see there are no anomalous days using standard measures of IQR and z-score. However, if we use the anomalize package, we can identify some anomalies. Here we use STL to decompose the time series and identify anomalies.
+
+```{r}
+# Convert to tibble for anomalize
+data <- as_tibble(rev_analysis)
+
+# Check for missing values in total_revenue
+if (any(is.na(data$total_revenue))) {
+  cat("Found", sum(is.na(data$total_revenue)), "missing values in total_revenue.\n")
+  # Impute missing values with linear interpolation
+  data <- data %>%
+    mutate(total_revenue = na.approx(total_revenue, na.rm = FALSE))
+  cat("Missing values imputed with linear interpolation.\n")
+}
+
+# Anomaly detection with anomalize
+anomaly_data <- data %>%
+  time_decompose(total_revenue, method = "stl", frequency = "auto", trend = "auto") %>%
+  anomalize(remainder, method = "iqr") %>%
+  time_recompose()
+
+# Create data frame for anomalous days
+anomalies <- anomaly_data %>% filter(anomaly == "Yes")
+
+# Visualize anomalies
+anomaly_data %>%
+  plot_anomalies(time_recomposed = TRUE,
+                 alpha_circles = 1) +
+  labs(title = "Revenue with Anomalies Highlighted", x = "Date", y = "Total Revenue",
+       caption = "Jeff Horowitz | Marketing Analysis") +
+  mytheme + 
+  scale_y_continuous(labels = dollar_format())
+
+# Count anomalous days detected by anomalize
+cat("Number of anomalous days detected using anomalize:", nrow(anomalies), "\n")
+
+# Create a data frame of anomalous days
+anomalous_days <- anomaly_data %>%
+  filter(anomaly == "Yes") %>%
+  select(date, observed, anomaly)
+
+# Display the anomalous days
+kable(anomalous_days)
+```
+
+By decomposing the revenue into trend, seasonal, and residual, we are able to identify some anomalous day.
+
+## Question 3
+
+**In which month of the year does Acme tend to make the most revenue?**
+
+```{r}
+# Create a new data frame for monthly revenue analysis by summing up revenue from each month and grouping by month.
+monthly_revenue <- rev_data %>%
+  mutate(month = month(date)) %>%
+  group_by(month) %>%
+  summarise(total_revenue = sum(revenue_dtc, revenue_walmart, revenue_amazon, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(month)
+
+# Plot the monthly revenue data
+ggplot(monthly_revenue, aes(x = factor(month, levels = 1:12), y = total_revenue)) +
+  geom_bar(stat = "identity", fill = "#d87b64") +
+  labs(title = "Total Monthly Revenue",
+       x = "Month",
+       y = "Total Revenue",
+       caption = "Jeff Horowitz | Marketing Analysis") +
+  scale_x_discrete(labels = month.abb) +
+  scale_y_continuous(labels = dollar_format()) +
+  mytheme
+
+# Find the month with the highest revenue
+highest_month <- monthly_revenue %>%
+  filter(total_revenue == max(total_revenue)) %>%
+  select(month, total_revenue)
+
+cat("The month with the highest total revenue is", month.name[highest_month$month], "with a total revenue of", dollar(highest_month$total_revenue), ".\n")
+```
+
+This is good in theory, but we don't have a complete dataset for 2022, so this comparison is not accurate. As such, we can look at the monthly spend and calculate the average spend per month to get a better idea of which month is the most profitable.
+
+```{r}
+# Calculate monthly revenue per year
+monthly_revenue_analysis <- rev_data %>%
+  mutate(
+    month = month(date, label = TRUE, abbr = FALSE),
+    month_num = month(date),
+    year = year(date)
+  ) %>%
+  group_by(year, month, month_num) %>%
+  summarise(monthly_revenue = sum(revenue_dtc, revenue_walmart, revenue_amazon, na.rm = TRUE), .groups = 'drop')
+
+# Plot the monthly revenue for each year
+ggplot(monthly_revenue_analysis, aes(x = month, y = monthly_revenue, fill = factor(year))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Monthly Revenue Across All Years",
+       x = "Month",
+       y = "Monthly Revenue",
+       caption = "Jeff Horowitz | Marketing Analysis") +
+  scale_x_discrete(labels = month.abb) +
+  scale_y_continuous(labels = dollar_format()) +
+  mytheme +
+  theme(legend.title = element_blank())
+
+# Calculate average monthly revenue across all years
+monthly_revenue_analysis <-monthly_revenue_analysis %>%
+  group_by(month, month_num) %>%
+  summarise(
+    avg_monthly_revenue = mean(monthly_revenue),
+    median_monthly_revenue = median(monthly_revenue),
+    min_revenue = min(monthly_revenue),
+    max_revenue = max(monthly_revenue),
+    std_dev = sd(monthly_revenue),
+    .groups = 'drop'
+   ) %>%
+  arrange(desc(avg_monthly_revenue))
+
+# Plot the average monthly revenue
+ggplot(monthly_revenue_analysis, aes(x = month, y = avg_monthly_revenue)) +
+  geom_bar(stat = "identity", fill = "#d87b64") +
+  labs(title = "Average Monthly Revenue Across All Years",
+       x = "Month",
+       y = "Average Monthly Revenue",
+       caption = "Jeff Horowitz | Marketing Analysis") +
+  scale_x_discrete(labels = month.abb) +
+  scale_y_continuous(labels = dollar_format()) +
+  mytheme
+# Find the month with the highest average revenue
+highest_avg_month <- monthly_revenue_analysis %>%
+  filter(avg_monthly_revenue == max(avg_monthly_revenue)) %>%
+  select(month, avg_monthly_revenue)
+
+cat("The month with the highest average revenue is", month.name[highest_avg_month$month], "with an average monthly revenue of", dollar(highest_avg_month$avg_monthly_revenue), ".\n")
+
+```
+
+## Question 4
+
+**Does Acme's marketing spend tend to follow a similar pattern to revenue?**
+
+```{r}
+# Create a new data frame for spend and revenue analysis
+spend_revenue_analysis <- spend_data %>%
+  group_by(date) %>%
+  summarise(total_spend = sum(spend, na.rm = TRUE), .groups = 'drop') %>%
+  left_join(rev_data %>%
+              group_by(date) %>%
+              summarise(total_revenue = sum(revenue_dtc, revenue_walmart, revenue_amazon, na.rm = TRUE), .groups = 'drop'),
+            by = "date")
+
+# Plot the spend and revenue data
+ggplot(spend_revenue_analysis, aes(x = date)) +
+  geom_line(aes(y = total_spend, color = "Total Spend"), linewidth = 1) +
+  geom_line(aes(y = total_revenue, color = "Total Revenue"), linewidth = 1) +
+  labs(title = "Total Spend vs Total Revenue Over Time",
+       x = "Date",
+       y = "Amount",
+       caption = "Jeff Horowitz | Marketing Analysis") +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_color_manual(values = c("Total Spend" = "#d87b64", "Total Revenue" = "#3f8f29")) +
+  mytheme +
+  theme(legend.title = element_blank(),
+        legend.position = c(0.95, 0.95), legend.justification = c(.75, 1))
+
+# Calculate correlation between spend and revenue
+correlation <- cor(spend_revenue_analysis$total_spend, spend_revenue_analysis$total_revenue, use = "complete.obs")
+cat("The correlation between total spend and total revenue is", round(correlation, 2), ".\n")
+
+```
+
+We can also calculate correlation between spend and revenue for each channel to see if there is a relationship between spend and revenue for each channel.
+
+```{r}
+# Calculate the correlation for each channel
+channel_correlation <- spend_data %>%
+  group_by(channel, date) %>%
+  summarise(total_spend = sum(spend, na.rm = TRUE), .groups = 'drop') %>%
+  left_join(rev_data %>%
+              group_by(date) %>%
+              summarise(total_revenue = sum(revenue_dtc, revenue_walmart, revenue_amazon, na.rm = TRUE), .groups = 'drop'),
+            by = "date") %>%
+  group_by(channel) %>%
+  summarise(correlation = cor(total_spend, total_revenue, use = "complete.obs"),.groups = 'drop')
+
+cat("Correlation between spend and revenue for each channel:\n")
+print(channel_correlation)
+
+# Plot the correlation for each channel
+ggplot(channel_correlation, aes(x = reorder(channel, correlation), y = correlation)) +
+  geom_bar(stat = "identity", fill = "#d87b64") +
+  coord_flip() +
+  labs(title = "Correlation Between Spend and Revenue by Channel",
+       x = "Channel",
+       y = "Correlation",
+       caption = "Jeff Horowitz | Marketing Analysis") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  mytheme
+
+```
+
+Based on the correlation analysis, we can see that there is a positive correlation between spend and revenue overall and for most channels, indicating that as spend increases, revenue tends to increase as well. This is confirmed by the positive correlation of 0.91 for the overall analysis, and the positive values for the majority of the channels.However, for google_branded_search, the correlation is slightly negative, indicating that there may be some inefficiencies in this channel or warrant further investigation.
+
+## Question 5
+
+**Based on what you see here, could you make the case that marketing spend is causally related to revenue? Why or why not?**
+
+Based on the analysis, we can observe a positive correlation between marketing spend and revenue for most channels, suggesting that increased spending is generally associated with higher revenue. However, correlation does not imply causation.
+
+There are several factors to consider when evaluating the causal relationship between marketing spend and revenue:
+
+* **Time Lag (Adstock)**: The impact of marketing spend on revenue may not be immediate. There could be a time lag between when the spend occurs and when the revenue is realized, making it difficult to establish a direct causal link.
+
+* **Attribution**: Accurately attributing revenue to specific marketing channels can be challenging. Revenue may come from multiple sources, and it can be difficult to determine which channel or campaign was responsible for a particular sale.
+
+* **Data Limitations**: The analysis is based on historical data, which may not capture all relevant variables or account for changes in consumer behavior over time.
+
+* **External Factors**: Economic conditions, competitive actions, and changes in consumer preferences can also impact revenue independently of marketing spend.
+
+* **Unobserved Heterogeneity**: There may be unobserved factors that influence both marketing spend and revenue, leading to a spurious correlation. 
+
+In conclusion, while the analysis shows a positive correlation between marketing spend and revenue, it is essential to conduct further research, such as controlled experiments (A/B test) or advanced statistical modeling, to establish a more definitive causal relationship. 
+
+
+```{r include = FALSE}
+# Convert HTML to PDF
+chrome_print("Marketing-Analysis.html", "Marketing-Analysis.pdf")
+```
+
