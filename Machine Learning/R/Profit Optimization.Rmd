@@ -1,0 +1,399 @@
+---
+title: "Profit Optimization for Credit Card Offers"
+author: "Jeff Horowitz"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Background
+
+**Situation**
+
+A credit card company only wants to extend credit card offers to people with an income above $50,000. Thus, the main criteria is that the person must have a projected income above $50,000 and your predictive model uses income as the target variable.
+
+**Task**
+
+Build a classifier using the training data, and score the test data.
+
+**Details** 
+
+Your goal is to maximize profit given the benefits of the true positives and true negatives, and the costs of the false positives and the false negatives.
+
+* The benefit of a true positive is equal to the lifetime value of a credit card customer, estimated to be $1400
+
+* If you incorrectly give a person a credit card (false positive) and the person defaults, and it goes into collection then you can lose not only the principal but also have a cost of collection. This is estimated to be a loss of $1200
+
+* Not issuing a card to a person who would have been a good customer (false negative) is an opportunity lost. Missing out this opportunity costs $800
+
+* Not issuing a card to someone who did not deserve one (true negative) saves some minor processing benefit of $10.
+
+**Data**
+
+You are given a dataset of potential customers . There are customers with known income and those without known income (the training and test sets respectively). The data contain 48842 instances with a mix of continuous and discrete (train=32561, test=16281) in two files “train-baggle.csv” and “test-baggle.csv” respectively.
+
+The data contain following fields:
+* age: continuous
+
+* workclass: Private, Self-emp-not-inc, Self-emp-inc, Federal-gov, Local-gov, State-gov, Without-pay, Never-worked
+
+* education: Bachelors, Some-college, 11th, HS-grad, Prof-school, Assoc-acdm, Assoc-voc, 9th, 7th-8th, 12th, Masters, 1st-4th, 10th, Doctorate, 5th-6th, Preschool
+
+* education_years: continuou
+
+* marital-status: Married-civ-spouse, Divorced, Never-married, Separated, Widowed, Married-spouse-absent, Married-AF-spouse
+
+* occupation: Tech-support, Craft-repair, Other-service, Sales, Exec-managerial, Prof-specialty, Handlers-cleaners, Machine-op-inspct, Adm-clerical, Farming-fishing, Transport-moving, Priv-house-serv, Protective-serv, Armed-Forces
+
+* relationship: Wife, Own-child, Husband, Not-in-family, Other-relative, Unmarried
+
+* race: White, Asian-Pac-Islander, Amer-Indian-Eskimo, Other, Black
+
+* sex: Female, Male
+
+* hours-per-week: continuous
+
+* native-country: United-States, Cambodia, England, Puerto-Rico, Canada, Germany, Outlying-US(Guam-USVI-etc), India, Japan, Greece, South, China, Cuba, Iran, Honduras, Philippines, Italy, Poland, Jamaica, Vietnam, Mexico, Portugal, Ireland, France, Dominican-Republic, Laos, Ecuador, Taiwan, Haiti, Columbia, Hungary, Guatemala, Nicaragua, Scotland, Thailand, Yugoslavia, El-Salvador, Trinadad&Tobago, Peru, Hong, Holand-Netherlands
+
+* target (income category): >50K coded as ‘1’, <=50K coded as ‘0’
+
+# 1. Load Libraries
+
+Load in all libraries required for processing and model building.
+
+```{r}
+library("tidyverse")
+library("skimr")
+library("readxl")
+library("dplyr") 
+library("FNN") 
+library("caret") 
+library("class") 
+library("rpart.plot") 
+library("rpart")
+library("glmnet") 
+library('NeuralNetTools') 
+library("PRROC") 
+library("ROCR") 
+library(abind)
+library("DMwR")
+library(leaps)
+library(kernlab)
+library(fastDummies)
+library(lightgbm)
+library(caretEnsemble)
+library(gdata)
+```
+
+# 2. Data Loading and Pre-Processing
+
+Training Data Pre-Processing
+
+```{r}
+
+# Read the CSV file into a data frame 'income_df' (change to your working directory)
+income_df_train <- read_csv("train-baggle.csv", col_types = "nffnfffffnff")
+
+# View all variables
+skim(income_df_train)
+
+# Check NAs
+sum(is.na(income_df_train))
+
+# Exploratory analysis of the categorical features of the data
+income_df_train %>%
+  keep(is.factor) %>%
+  summary()
+
+# There are few features with more than 6 levels.
+# We use the table() function to get the distribution for their values.
+table(select(income_df_train, workClassification))
+table(select(income_df_train, educationLevel))
+table(select(income_df_train, maritalStatus))
+table(select(income_df_train, occupation))
+table(select(income_df_train, relationship))
+table(select(income_df_train, race))
+table(select(income_df_train, gender))
+table(select(income_df_train, nativeCountry))
+
+# There are missing values for workClassification, nativeCountry and occupation.
+# The missing values are represented by an indicator variable of '?'.
+# Replace these with 'UNK' instead.
+income_df_train <- income_df_train %>%
+  mutate(workClassification = recode(workClassification, "?" = "UNK")) %>%
+  mutate(nativeCountry = recode(nativeCountry, "?" = "UNK")) %>%
+  mutate(occupation = recode(occupation, "?" = "UNK")) 
+
+# Check results
+table(select(income_df_train, workClassification))
+table(select(income_df_train, occupation))
+table(select(income_df_train, nativeCountry))
+
+# Check the output
+summary(income_df_train[,"income"])
+
+# Create an empty data frame to store results from different models
+clf_results <- data.frame(matrix(ncol = 5, nrow = 0))
+names(clf_results) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
+
+# Create an empty data frame to store TP, TN, FP and FN values
+cost_benefit_df <- data.frame(matrix(ncol = 5, nrow = 0))
+names(cost_benefit_df) <- c("Model", "TP", "FN", "FP", "TN")
+
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+income_df_train$age <- normalize(income_df_train$age)
+income_df_train$educationYears <- normalize(income_df_train$educationYears)
+income_df_train$workHours <- normalize(income_df_train$workHours)
+
+# Create Dummy Variables
+income_df_train <- dummy_cols(income_df_train, select_columns = c('workClassification',
+                                                                  'educationLevel',
+                                                                  'maritalStatus',
+                                                                  'occupation',
+                                                                  'relationship',
+                                                                  'race',
+                                                                  'gender',
+                                                                  'nativeCountry'),
+                              remove_selected_columns = TRUE)
+                              #remove_first_dummy = TRUE)
+
+data_y = income_df_train %>% pull("income") 
+data_x = income_df_train %>% select(-c("income","nativeCountry_Holand-Netherlands"))
+
+```
+
+Testing Data Pre-Processing
+
+```{r}
+# Read the CSV file into a data frame 'income_df' (change to your working directory)
+income_df_test <- read_csv("test-baggle.csv", col_types = "nnffnfffffnff")
+
+# View all variables
+skim(income_df_test)
+
+# Check NAs
+sum(is.na(income_df_test))
+
+# Exploratory analysis of the categorical features of the data
+income_df_test %>%  keep(is.factor) %>%  summary()
+
+# There are few features with more than 6 levels.
+# We use the table() function to get the distribution for their values.
+table(select(income_df_test, workClassification))
+table(select(income_df_test, educationLevel))
+table(select(income_df_test, maritalStatus))
+table(select(income_df_test, occupation))
+table(select(income_df_test, relationship))
+table(select(income_df_test, race))
+table(select(income_df_test, gender))
+table(select(income_df_test, nativeCountry))
+
+# There are missing values for workClassification, nativeCountry and occupation.
+# The missing values are represented by an indicator variable of '?'.
+# Replace these with 'UNK' instead.
+income_df_test <- income_df_test %>%
+  mutate(workClassification = recode(workClassification, "?" = "UNK")) %>%
+  mutate(nativeCountry = recode(nativeCountry, "?" = "UNK")) %>%
+  mutate(occupation = recode(occupation, "?" = "UNK")) 
+
+# Check results
+table(select(income_df_test, workClassification))
+table(select(income_df_test, occupation))
+table(select(income_df_test, nativeCountry))
+
+# Check the output
+summary(income_df_test[,"income"])
+
+# Create an empty data frame to store results from different models
+clf_results <- data.frame(matrix(ncol = 5, nrow = 0))
+names(clf_results) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
+
+# Create an empty data frame to store TP, TN, FP and FN values
+cost_benefit_df <- data.frame(matrix(ncol = 5, nrow = 0))
+names(cost_benefit_df) <- c("Model", "TP", "FN", "FP", "TN")
+
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+income_df_test$age <- normalize(income_df_test$age)
+income_df_test$educationYears <- normalize(income_df_test$educationYears)
+income_df_test$workHours <- normalize(income_df_test$workHours)
+
+# Create Dummy Variables
+income_df_test <- dummy_cols(income_df_test, select_columns = c('workClassification',
+                                                                  'educationLevel',
+                                                                  'maritalStatus',
+                                                                  'occupation',
+                                                                  'relationship',
+                                                                  'race',
+                                                                  'gender',
+                                                                  'nativeCountry'),
+                              remove_selected_columns = TRUE)
+                              #remove_first_dummy = TRUE)
+
+data_test_y = income_df_test %>% pull("income") 
+data_test_x = income_df_test %>% select(-c("Id","income"))
+```
+
+Testing for Missing Columns Between Training and Testing Data
+
+```{r}
+# Get column names of both datasets
+train_columns <- colnames(data_x)
+test_columns <- colnames(data_test_x)
+
+# Find columns in training data but missing in test data
+missing_in_test <- setdiff(train_columns, test_columns)
+
+# Find columns in test data but missing in training data
+extra_in_test <- setdiff(test_columns, train_columns)
+
+# Print the results
+if (length(missing_in_test) > 0) {
+  cat("Columns in training data but missing in test data:\n")
+  print(missing_in_test)
+} else {
+  cat("No columns missing in test data.\n")
+}
+
+if (length(extra_in_test) > 0) {
+  cat("Columns in test data but missing in training data:\n")
+  print(extra_in_test)
+} else {
+  cat("No extra columns in test data.\n")
+}
+```
+
+
+# 3. Training/Testing Split
+
+```{r}
+# Split the data into 75% training and 25% testing
+set.seed(16)
+
+# Randomly select rows for training, validation, and testing
+sample_size <- floor(0.75 * nrow(data_x))
+train_ind <- sample(seq_len(nrow(data_x)), size = sample_size)
+
+# Create data frames for training, validation, and testing
+income_df_train_x <- data_x[train_ind,]
+income_df_validation_x <- data_x[-train_ind,]
+income_df_train_y <- data_y[train_ind]
+income_df_validation_y <- data_y[-train_ind]
+```
+
+# 4. Model Building
+
+```{r}
+train_matrix <- as.matrix(income_df_train_x)
+train_labels <- as.matrix(income_df_train_y)
+
+test_matrix <- as.matrix(income_df_validation_x)
+test_labels <- as.matrix(income_df_validation_y)
+
+dtrain <- lgb.Dataset(data = train_matrix, label = train_labels)
+dtest <- lgb.Dataset(data = test_matrix, label = test_labels)
+
+params <- list(
+  objective = "binary",
+  metric = "auc", # evaluation metrics
+  boosting = "gbdt", # boosting mechanism 
+  num_leaves = 40,  # maximum number of leaves in a single tree
+  learning_rate = 0.02, # learning rate
+  feature_fraction = 1, # fraction of features to be used in each iteration
+  bagging_fraction = 1, # fraction of data to be used in each iteration
+  bagging_freq = 30, # perform bagging every 5 iterations
+  lambda_l1 = 0, # L1 regularization
+  lambda_l2 = 1, #, L2 regularization
+  max_depth = 20
+)
+
+
+lgb_model <- lgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 500, # number of boosting rounds
+  valids = list(test = dtest),
+  early_stopping_rounds = 10, # stop if validation does not improve for 10 rounds
+  verbose = 1
+)
+
+# Function to calculate profit across different thresholds
+calculate_profit <- function(threshold, model, benefit_TP, benefit_TN, cost_FP, cost_FN){
+  model_predict <- predict(model, test_matrix, type = 'prob')
+  y_pred_num <- ifelse(model_predict > threshold, 1, 0)
+  a <- confusionMatrix(as.factor(y_pred_num), as.factor(test_labels), positive = "1")
+  
+  TP = a[["table"]][4] 
+  FN = a[["table"]][3] 
+  FP = a[["table"]][2] 
+  TN = a[["table"]][1]
+  
+  profit <- (benefit_TP*TP)+(benefit_TN*TN)+(cost_FP*FP)+(cost_FN*FN)
+  return(profit)
+}
+
+# Set the thresholds between .1 and .9
+thresholds <- seq(.1, .9, by = .1)
+
+# Call profit function w/costs and benefits according to the case
+profits <- sapply(thresholds, calculate_profit, lgb_model, benefit_TP=1400, benefit_TN=10, cost_FP = -1200, cost_FN = -800)
+optimal_threshold <- thresholds[which.max(profits)]
+optimal_profit <- max(profits)
+
+profit_data <- data.frame(
+  Threshold = thresholds,
+  Profit = profits
+)
+
+# Plot the profits against the thresholds
+options(scipen=999)
+ggplot(profit_data, aes(x = Threshold, y = Profit)) +
+  geom_line(color = "blue", linewidth = 1.2) + 
+  geom_vline(xintercept = optimal_threshold, color = "red", linetype = "dashed") +
+  labs(
+    title = "Profit vs. Threshold",
+    x = "Threshold",
+    y = "Profit"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+```
+
+# 5. Predict and Score Data
+
+```{r}
+# Create x testing set
+income_df_test_x <- data_test_x
+test_final_matrix <- as.matrix(income_df_test_x)
+
+# Predict on testing set
+lgb_predict_prob <- predict(lgb_model, test_final_matrix, type="prob")
+y_pred_factor <- as.factor(ifelse(lgb_predict_prob > 0.4, 1, 0))
+
+filename <- "DigMark2"
+
+scoreAllOne <- y_pred_factor  #assuming your prediction in factor form is in y_pred_factor
+Id <- seq(1,nrow(income_df_test),1) #this is just the index number
+
+tempScoreFrame <- data.frame(Id, scoreAllOne) #create a new data frame with 2 columns
+names(tempScoreFrame) <- c("Id", "income") #give names to the 2 columns
+
+
+write.csv(tempScoreFrame, paste(trim(filename),".csv"), row.names=FALSE)
+
+```
+
